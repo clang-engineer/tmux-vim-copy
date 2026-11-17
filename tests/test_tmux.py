@@ -275,7 +275,10 @@ class NativeCopyMode(unittest.TestCase):
             self.output = b""
             os.write(self.terminal, b"3")
             self.assertTrue(self.rendered.wait_for(lambda: prompt in self.output, timeout=5))
-        self.keys("w")
+        ready = "repeat-" + uuid.uuid4().hex
+        self.command("bind-key", "-T", "copy-mode-vi", "F12", "wait-for", "-S", ready)
+        os.write(self.terminal, b"w\x1b[24~")
+        self.wait(ready)
         self.assertEqual(self.field("copy_cursor_x"), "14")
 
     def test_viewport_is_preserved_by_visual_selection_and_positioned_by_z(self):
