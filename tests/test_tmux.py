@@ -1,11 +1,16 @@
 """Real tmux client tests: no mocked key bindings or selection forwarding."""
+import errno
+import fcntl
 import os
 from pathlib import Path
 import shlex
 import shutil
 import subprocess
 import sys
+import struct
 import tempfile
+import termios
+import threading
 import unittest
 import uuid
 
@@ -19,6 +24,10 @@ class NativeCopyMode(unittest.TestCase):
         self.socket = str(Path(self.directory.name) / "socket")
         self.pane = "test:0.0"
         self.client_process = None
+        self.terminal = None
+        self.output = b""
+        self.rendered = threading.Condition()
+        self.reader = None
         self.addCleanup(self.close)
         self.command("-f", "/dev/null", "new-session", "-d", "-s", "test",
                      "-x", "80", "-y", "16", "sh")
@@ -27,26 +36,46 @@ class NativeCopyMode(unittest.TestCase):
         self.command("set-option", "-s", "set-clipboard", "off")
         self.command("set-option", "-g", "@vim-copy-python", sys.executable)
         attached = "attached-" + uuid.uuid4().hex
-        self.client_process = subprocess.Popen(
-            ["tmux", "-S", self.socket, "-C", "attach-session", "-t", "test"],
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, text=True,
-        )
-        self.client_process.stdin.write("wait-for -S " + attached + "\n")
-        self.client_process.stdin.flush()
+        self.terminal, slave = os.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 16, 80, 0, 0))
+        try:
+            self.client_process = subprocess.Popen(
+                ["tmux", "-S", self.socket, "attach-session", "-t", "test",
+                 ";", "wait-for", "-S", attached],
+                stdin=slave, stdout=slave, stderr=slave,
+                env={**os.environ, "TERM": "xterm-256color"},
+            )
+        finally:
+            os.close(slave)
+        self.reader = threading.Thread(target=self.drain_terminal, daemon=True)
+        self.reader.start()
         self.wait(attached)
         self.client = self.command("list-clients", "-F", "#{client_name}").strip()
-        self.command("refresh-client", "-t", self.client, "-C", "80x16")
         self.install()
 
     def close(self):
         subprocess.run(["tmux", "-S", self.socket, "kill-server"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if self.client_process:
-            if self.client_process.stdin:
-                self.client_process.stdin.close()
             self.client_process.wait(timeout=5)
+        if self.reader:
+            self.reader.join(timeout=5)
+        if self.terminal is not None:
+            os.close(self.terminal)
         self.directory.cleanup()
+
+    def drain_terminal(self):
+        try:
+            while True:
+                data = os.read(self.terminal, 65536)
+                if not data:
+                    break
+                with self.rendered:
+                    self.output = (self.output + data)[-8192:]
+                    self.rendered.notify_all()
+        except OSError as error:
+            if error.errno != errno.EIO:  # PTY slave closed when tmux detached.
+                raise
 
     def command(self, *args):
         result = subprocess.run(["tmux", "-S", self.socket, *args],
@@ -236,7 +265,16 @@ class NativeCopyMode(unittest.TestCase):
         self.assertEqual(self.field("copy_cursor_x"), "3")
         self.fixture("one two three four", column=6)
         self.keys("g", "g")
-        self.command("send-keys", "-K", "-c", self.client, "3")
+        # Native digit bindings open a prompt. A control-mode client cannot
+        # model its input, and batching 3w can precede prompt installation.
+        bindings = (shlex.split(line) for line in
+                    self.command("list-keys", "-T", "copy-mode-vi").splitlines())
+        digit = next(parts for parts in bindings if parts[3] == "3")
+        prompt = digit[digit.index("-p") + 1].encode()
+        with self.rendered:
+            self.output = b""
+            os.write(self.terminal, b"3")
+            self.assertTrue(self.rendered.wait_for(lambda: prompt in self.output, timeout=5))
         self.keys("w")
         self.assertEqual(self.field("copy_cursor_x"), "14")
 

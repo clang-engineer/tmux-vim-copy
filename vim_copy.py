@@ -22,6 +22,10 @@ class CopyError(Exception):
     """An actionable error that should be shown to the invoking client."""
 
 
+class UnsupportedText(CopyError):
+    """A selection cannot be mapped safely; keep Copy Mode and notify in place."""
+
+
 def tmux(*args: str) -> str:
     result = subprocess.run(["tmux", *args], capture_output=True, text=True)
     if result.returncode:
@@ -47,7 +51,7 @@ def cell_positions(text: str) -> tuple[list[int], int]:
         if (char == "\u200d" or 0xFE00 <= code <= 0xFE0F
                 or 0xE0100 <= code <= 0xE01EF or 0x1F3FB <= code <= 0x1F3FF
                 or 0x1F1E6 <= code <= 0x1F1FF):
-            raise CopyError("complex emoji grapheme on this line; use native selection")
+            raise UnsupportedText("complex emoji grapheme on this line; use native selection")
         if unicodedata.combining(char) or unicodedata.category(char) in {"Mn", "Me"}:
             positions.append(previous)
             continue
@@ -348,7 +352,12 @@ def main() -> int:
         if args.command == "install":
             install()
         else:
-            action(args)
+            try:
+                action(args)
+            except UnsupportedText as error:
+                # run-shell displays stderr in a new pane mode, losing the
+                # selection we deliberately preserved. Report this in place.
+                notify(args.client, str(error))
     except (CopyError, OSError) as error:
         message = str(error)
         print("vim-copy: " + message, file=sys.stderr)
