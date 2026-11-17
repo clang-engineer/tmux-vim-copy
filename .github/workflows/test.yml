@@ -1,0 +1,50 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install tmux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libevent-dev libncurses-dev pkg-config
+      - name: Build pinned tmux 3.7c
+        run: |
+          curl --fail --location --retry 3 https://github.com/tmux/tmux/releases/download/3.7c/tmux-3.7c.tar.gz -o "$RUNNER_TEMP/tmux-3.7c.tar.gz"
+          tar -xzf "$RUNNER_TEMP/tmux-3.7c.tar.gz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/tmux-3.7c"
+          ./configure --prefix="$RUNNER_TEMP/tmux"
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/tmux/bin" >> "$GITHUB_PATH"
+      - name: Test
+        run: make test
+      - name: Compile Python sources without bytecode files
+        run: make lint
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install current tmux
+        run: brew install tmux
+      - name: Test
+        run: make test
+      - name: Compile Python sources without bytecode files
+        run: make lint
